@@ -57,6 +57,41 @@ func (h *ReservationHandler) Confirm(c *gin.Context) {
 	response.OKMessage(c, constants.MsgUpdateSuccess, res)
 }
 
+// Detail 查询预约详情。
+func (h *ReservationHandler) Detail(c *gin.Context) {
+	var idReq dto.IDReq
+	if err := c.ShouldBindUri(&idReq); err != nil {
+		response.Fail(c, 400, constants.CodeValidation, "预约 ID 无效")
+		return
+	}
+	res, err := h.reservationService.GetByID(idReq.ID)
+	if err != nil {
+		h.abort(c, err)
+		return
+	}
+	response.OK(c, res)
+}
+
+// Reschedule 预约改期：换机位、换时段。
+func (h *ReservationHandler) Reschedule(c *gin.Context) {
+	var idReq dto.IDReq
+	if err := c.ShouldBindUri(&idReq); err != nil {
+		response.Fail(c, 400, constants.CodeValidation, "预约 ID 无效")
+		return
+	}
+	var req dto.RescheduleReservationReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Fail(c, 400, constants.CodeValidation, "改期参数校验失败："+err.Error())
+		return
+	}
+	res, err := h.reservationService.Reschedule(idReq.ID, &req)
+	if err != nil {
+		h.abort(c, err)
+		return
+	}
+	response.OKMessage(c, constants.MsgRescheduleOK, res)
+}
+
 // Cancel 取消预约。
 func (h *ReservationHandler) Cancel(c *gin.Context) {
 	var idReq dto.IDReq

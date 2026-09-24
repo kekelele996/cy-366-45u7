@@ -153,8 +153,10 @@ docker compose up -d --build
 | 方法 | 路径 | 说明 | 权限 |
 | --- | --- | --- | --- |
 | GET | /reservations | 预约分页列表 | 登录 |
+| GET | /reservations/:id | 预约详情 | 登录 |
 | POST | /reservations | 创建预约 | 登录 |
 | POST | /reservations/:id/confirm | 确认预约 | admin/staff |
+| POST | /reservations/:id/reschedule | 预约改期（换机位/换时段，开始前 30 分钟以上） | 登录 |
 | POST | /reservations/:id/cancel | 取消预约 | 登录 |
 | POST | /reservations/:id/checkin | 到店开机 | admin/staff |
 
@@ -213,6 +215,11 @@ curl -sS http://localhost:29506/api/v1/stations?page=1\&page_size=5 -H "Authoriz
 curl -sS -X POST http://localhost:29506/api/v1/reservations \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"station_id":1,"start_time":"2026-08-17T10:00:00+08:00","end_time":"2026-08-17T12:00:00+08:00"}'
+
+# 4.1 预约改期（开始前 30 分钟以上，换机位/换时段；目标时段冲突时返回 409 且原预约保留）
+curl -sS -X POST http://localhost:29506/api/v1/reservations/1/reschedule \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"station_id":2,"start_time":"2026-08-17T14:00:00+08:00","end_time":"2026-08-17T16:00:00+08:00"}'
 
 # 5. 购买时长包
 curl -sS -X POST http://localhost:29506/api/v1/recharges/packages \
@@ -280,8 +287,8 @@ npm run build
 
 | 端 | 文件 |
 | --- | --- |
-| 后端 | `backend/internal/constants/enums.go`（定义）、`backend/internal/model/reservation.go`、`backend/internal/dto/reservation_dto.go`（oneof 校验）、`backend/internal/service/reservation_service.go`（状态机 Confirm/Cancel/CheckIn）、`backend/internal/util/formatters.go`（StatusText）、`backend/internal/constants/error_codes.go`（CodeReservation）、`backend/internal/constants/log_templates.go`（reservation_* 模板）、`backend/internal/repository/reservation_repository.go`（CountConflict 状态集合） |
-| 前端 | `frontend/src/constants/index.ts`（RESERVATION_STATUS/TEXT/TYPE）、`frontend/src/components/StatusBadge.vue`、`frontend/src/pages/Reservations.vue`（筛选与操作按钮显隐） |
+| 后端 | `backend/internal/constants/enums.go`（定义）、`backend/internal/model/reservation.go`、`backend/internal/dto/reservation_dto.go`（oneof 校验 + RescheduleReservationReq）、`backend/internal/service/reservation_service.go`（状态机 Confirm/Reschedule/Cancel/CheckIn，canReschedule 限开始前 30 分钟）、`backend/internal/util/formatters.go`（StatusText）、`backend/internal/constants/error_codes.go`（CodeReservation）、`backend/internal/constants/log_templates.go`（reservation_* 模板）、`backend/internal/repository/reservation_repository.go`（CountConflict/CountActive 状态集合）、`backend/internal/handler/reservation_handler.go`（Detail/Reschedule）、`backend/internal/router/reservation.go` |
+| 前端 | `frontend/src/constants/index.ts`（RESERVATION_STATUS/TEXT/TYPE）、`frontend/src/components/StatusBadge.vue`、`frontend/src/pages/Reservations.vue`（筛选、详情弹窗与改期/取消按钮显隐）、`frontend/src/api/reservation.ts`（getReservation/rescheduleReservation） |
 
 ### 赛事状态（draft / open / ready / finished）
 
