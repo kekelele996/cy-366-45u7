@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -13,6 +14,9 @@ import (
 	"github.com/esportsbar/backend/internal/repository"
 	"github.com/esportsbar/backend/internal/util"
 )
+
+// RescheduleMinLeadMinutes 改期最小提前量（分钟）：开始前 30 分钟以上才允许改期。
+const RescheduleMinLeadMinutes = 30
 
 // ReservationService 机位预约服务。
 type ReservationService struct {
@@ -119,6 +123,111 @@ func (s *ReservationService) Cancel(id uint, userID uint) (*model.Reservation, e
 	return res, nil
 }
 
+// Reschedule 预约改期：开始前 30 分钟以上且待确认/已确认时，可换机位、换时段。
+// 新时段与目标机位已有有效预约重叠则返回冲突错误，原预约保留不变；
+// 改到其他机位且原机位无其他有效预约时，原机位恢复空闲，目标机位进入已预约。
+func (s *ReservationService) Reschedule(id uint, userID uint, role string, req *dto.RescheduleReservationReq) (*model.Reservation, error) {
+	if !req.EndTime.After(req.StartTime) {
+		return nil, util.NewAppError(constants.CodeValidation, "预约改期结束时间必须晚于开始时间")
+	}
+	res, err := s.getReservation(id)
+	if err != nil {
+		return nil, err
+	}
+	if role == constants.RoleMember && res.UserID != userID {
+		return nil, util.NewAppError(constants.CodeForbidden, "会员无权改期他人预约，请使用本人账号操作")
+	}
+	if err := canReschedule(res.Status, res.StartTime, time.Now()); err != nil {
+		return nil, err
+	}
+	station, err := s.stationService.GetByID(req.StationID)
+	if err != nil {
+		return nil, err
+	}
+	if station.Status != constants.StationIdle && station.Status != constants.StationReserved {
+		return nil, util.NewAppError(constants.CodeStationBusy, "目标机位当前不可预约，请选择其他机位")
+	}
+	oldStationID := res.StationID
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		// 换机位时按机位 ID 升序加锁，避免并发改期互相死锁。
+		firstID, secondID := oldStationID, req.StationID
+		if secondID < firstID {
+			firstID, secondID = secondID, firstID
+		}
+		stations := map[uint]*model.Station{}
+		locked, err := s.stationService.LockForUpdate(tx, firstID)
+		if err != nil {
+			return err
+		}
+		stations[firstID] = locked
+		if secondID != firstID {
+			locked, err = s.stationService.LockForUpdate(tx, secondID)
+			if err != nil {
+				return err
+			}
+			stations[secondID] = locked
+		}
+		target := stations[req.StationID]
+		if target.Status != constants.StationIdle && target.Status != constants.StationReserved {
+			return util.NewAppError(constants.CodeStationBusy, "目标机位当前不可预约，请选择其他机位")
+		}
+		// 锁机位后复查时段冲突：冲突则回滚，原预约继续保留。
+		cnt, err := s.reservationRepo.CountConflictTx(tx, req.StationID, req.StartTime, req.EndTime, res.ID)
+		if err != nil {
+			return err
+		}
+		if cnt > 0 {
+			return util.NewAppError(constants.CodeConflict, "目标机位在该时段已有有效预约，改期失败，原预约继续保留")
+		}
+		res.StationID = req.StationID
+		res.StartTime = req.StartTime
+		res.EndTime = req.EndTime
+		if err := s.reservationRepo.UpdateTx(tx, res); err != nil {
+			return err
+		}
+		if req.StationID != oldStationID {
+			// 原机位没有其他有效预约时恢复空闲。
+			remain, err := s.reservationRepo.CountActiveByStationTx(tx, oldStationID, res.ID)
+			if err != nil {
+				return err
+			}
+			oldStation := stations[oldStationID]
+			if remain == 0 && oldStation.Status == constants.StationReserved {
+				oldStation.Status = constants.StationIdle
+				if err := tx.Save(oldStation).Error; err != nil {
+					return err
+				}
+			}
+			// 目标机位进入已预约。
+			if target.Status == constants.StationIdle {
+				target.Status = constants.StationReserved
+				if err := tx.Save(target).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reservation reschedule tx: %w", err)
+	}
+	s.logger.Info(fmt.Sprintf(constants.LogTemplates["reservation_reschedule_ok"], id, oldStationID, req.StationID, req.StartTime.Format("2006-01-02 15:04")))
+	return res, nil
+}
+
+// canReschedule 改期状态机：仅待确认/已确认且距开始时间 30 分钟以上可改期。
+func canReschedule(status string, startTime, now time.Time) error {
+	if status != constants.ReservationPending && status != constants.ReservationConfirmed {
+		return util.NewAppError(constants.CodeReservation,
+			fmt.Sprintf("预约状态为 %s，仅待确认或已确认的预约可以改期", util.StatusText(status)))
+	}
+	if startTime.Sub(now) < RescheduleMinLeadMinutes*time.Minute {
+		return util.NewAppError(constants.CodeReservation,
+			fmt.Sprintf("距开始时间不足 %d 分钟，预约不可改期", RescheduleMinLeadMinutes))
+	}
+	return nil
+}
+
 // CheckIn 到店扫码开机：预约状态流转为 checked_in，机位置为使用中。
 func (s *ReservationService) CheckIn(id uint) (*model.Reservation, error) {
 	res, err := s.getReservation(id)
@@ -145,6 +254,11 @@ func (s *ReservationService) CheckIn(id uint) (*model.Reservation, error) {
 	}
 	s.logger.Info(fmt.Sprintf(constants.LogTemplates["reservation_checkin_ok"], id))
 	return res, nil
+}
+
+// GetByID 查询预约详情。
+func (s *ReservationService) GetByID(id uint) (*model.Reservation, error) {
+	return s.getReservation(id)
 }
 
 // List 分页查询预约。

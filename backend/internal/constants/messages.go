@@ -13,6 +13,7 @@ const (
 	MsgRechargeOK   = "充值成功"
 	MsgBuyPackageOK = "时长包购买成功"
 	MsgReserveOK    = "预约成功"
+	MsgRescheduleOK = "改期成功"
 	MsgCheckInOK    = "开机成功"
 	MsgRenewOK      = "续费成功"
 	MsgCheckoutOK   = "下机成功"

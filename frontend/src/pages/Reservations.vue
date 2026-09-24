@@ -12,11 +12,12 @@
       <van-dropdown-item v-model="status" :options="statusOptions" @change="load" />
     </van-dropdown-menu>
     <van-cell-group inset title="预约列表">
-      <van-cell v-for="r in list" :key="r.id" :title="`预约 #${r.id} · 机位 ${r.station_id}`" :label="`${formatTime(r.start_time)} ~ ${formatTime(r.end_time)}`">
+      <van-cell v-for="r in list" :key="r.id" :title="`预约 #${r.id} · 机位 ${r.station_id}`" :label="`${formatTime(r.start_time)} ~ ${formatTime(r.end_time)}`" is-link @click="openDetail(r)">
         <template #value>
           <StatusBadge kind="reservation" :status="r.status" />
-          <van-button v-if="isStaffOrAdmin && r.status === 'confirmed'" size="mini" type="primary" class="op-btn" @click="checkIn(r)">开机</van-button>
-          <van-button v-if="['pending','confirmed'].includes(r.status)" size="mini" type="danger" plain class="op-btn" @click="cancel(r)">取消</van-button>
+          <van-button v-if="['pending','confirmed'].includes(r.status)" size="mini" type="warning" plain class="op-btn" @click.stop="openReschedule(r)">改期</van-button>
+          <van-button v-if="isStaffOrAdmin && r.status === 'confirmed'" size="mini" type="primary" class="op-btn" @click.stop="checkIn(r)">开机</van-button>
+          <van-button v-if="['pending','confirmed'].includes(r.status)" size="mini" type="danger" plain class="op-btn" @click.stop="cancel(r)">取消</van-button>
         </template>
       </van-cell>
     </van-cell-group>
@@ -28,6 +29,34 @@
     <van-popup v-model:show="showEnd" position="bottom">
       <van-date-picker v-model="endDate" title="选择结束日期" @confirm="onEndDate" @cancel="showEnd = false" />
     </van-popup>
+
+    <van-popup v-model:show="showDetail" position="bottom" round>
+      <van-cell-group inset title="预约详情">
+        <van-cell title="预约编号" :value="detail ? `#${detail.id}` : '-'" />
+        <van-cell title="机位" :value="detail ? String(detail.station_id) : '-'" />
+        <van-cell title="开始时间" :value="formatTime(detail?.start_time)" />
+        <van-cell title="结束时间" :value="formatTime(detail?.end_time)" />
+        <van-cell title="状态">
+          <template #value><StatusBadge v-if="detail" kind="reservation" :status="detail.status" /></template>
+        </van-cell>
+        <van-cell title="备注" :value="detail?.remark || '-'" />
+      </van-cell-group>
+    </van-popup>
+
+    <van-popup v-model:show="showReschedule" position="bottom" round>
+      <van-cell-group inset :title="`预约改期 #${rescheduleTarget?.id ?? ''}`">
+        <van-field v-model="rsForm.station_id" type="number" label="目标机位ID" placeholder="输入目标机位ID" />
+        <van-field :model-value="rsForm.start_time" label="新开始时间" placeholder="选择开始时间" readonly is-link @click="openRsPicker('start')" />
+        <van-field :model-value="rsForm.end_time" label="新结束时间" placeholder="选择结束时间" readonly is-link @click="openRsPicker('end')" />
+      </van-cell-group>
+      <div class="submit-btn"><van-button round block type="warning" @click="submitReschedule">确认改期</van-button></div>
+    </van-popup>
+    <van-popup v-model:show="rsShowDate" position="bottom">
+      <van-date-picker v-model="rsDate" title="选择日期" @confirm="onRsDate" @cancel="rsShowDate = false" />
+    </van-popup>
+    <van-popup v-model:show="rsShowTime" position="bottom">
+      <van-time-picker v-model="rsTime" title="选择时间" @confirm="onRsTime" @cancel="rsShowTime = false" />
+    </van-popup>
   </div>
 </template>
 
@@ -35,8 +64,16 @@
 import { onMounted, ref } from 'vue'
 import { showSuccessToast, showToast } from 'vant'
 import StatusBadge from '@/components/StatusBadge.vue'
-import { listReservations, createReservation, cancelReservation, checkInReservation, type Reservation } from '@/api/reservation'
-import { formatTime } from '@/utils/format'
+import {
+  listReservations,
+  getReservation,
+  createReservation,
+  rescheduleReservation,
+  cancelReservation,
+  checkInReservation,
+  type Reservation,
+} from '@/api/reservation'
+import { formatTime, toRFC3339 } from '@/utils/format'
 import { useAuth } from '@/hooks/useAuth'
 
 const { isStaffOrAdmin } = useAuth()
@@ -56,8 +93,21 @@ const statusOptions = [
 const form = ref({ station_id: '', start_time: '', end_time: '', remark: '' })
 const showStart = ref(false)
 const showEnd = ref(false)
-const startDate = ref<Date[]>([])
-const endDate = ref<Date[]>([])
+const startDate = ref<string[]>([])
+const endDate = ref<string[]>([])
+
+const showDetail = ref(false)
+const detail = ref<Reservation | null>(null)
+
+const showReschedule = ref(false)
+const rescheduleTarget = ref<Reservation | null>(null)
+const rsForm = ref({ station_id: '', start_time: '', end_time: '' })
+const rsPicker = ref<'start' | 'end'>('start')
+const rsShowDate = ref(false)
+const rsShowTime = ref(false)
+const rsDate = ref<string[]>([])
+const rsTime = ref<string[]>(['10', '00'])
+const rsPickedDate = ref('')
 
 async function load() {
   const data = await listReservations({ page: page.value, page_size: pageSize, status: status.value || undefined })
@@ -84,6 +134,56 @@ async function create() {
   await createReservation({ station_id: stationId, start_time: form.value.start_time, end_time: form.value.end_time, remark: form.value.remark })
   showSuccessToast('预约成功')
   form.value = { station_id: '', start_time: '', end_time: '', remark: '' }
+  load()
+}
+
+async function openDetail(r: Reservation) {
+  detail.value = await getReservation(r.id)
+  showDetail.value = true
+}
+
+function openReschedule(r: Reservation) {
+  rescheduleTarget.value = r
+  rsForm.value = { station_id: String(r.station_id), start_time: formatTime(r.start_time), end_time: formatTime(r.end_time) }
+  showReschedule.value = true
+}
+
+function openRsPicker(which: 'start' | 'end') {
+  rsPicker.value = which
+  rsShowDate.value = true
+}
+
+function onRsDate({ selectedValues }: any) {
+  rsPickedDate.value = selectedValues.join('-')
+  rsShowDate.value = false
+  rsShowTime.value = true
+}
+
+function onRsTime({ selectedValues }: any) {
+  const value = `${rsPickedDate.value} ${selectedValues.join(':')}:00`
+  if (rsPicker.value === 'start') {
+    rsForm.value.start_time = value
+  } else {
+    rsForm.value.end_time = value
+  }
+  rsShowTime.value = false
+}
+
+async function submitReschedule() {
+  const target = rescheduleTarget.value
+  if (!target) return
+  const stationId = Number(rsForm.value.station_id)
+  if (!stationId || !rsForm.value.start_time || !rsForm.value.end_time) {
+    showToast('请填写目标机位与新时段')
+    return
+  }
+  await rescheduleReservation(target.id, {
+    station_id: stationId,
+    start_time: toRFC3339(rsForm.value.start_time),
+    end_time: toRFC3339(rsForm.value.end_time),
+  })
+  showSuccessToast('改期成功')
+  showReschedule.value = false
   load()
 }
 

@@ -28,7 +28,7 @@ docker compose up -d --build
 
 1. **机位/包厢实时状态看板**：网格/列表展示机位实时状态（空闲/使用中/故障/预约），按区域筛选，支持 WebSocket 实时推送（`/api/v1/ws/stations`）。
 2. **会员充值与时长包**：会员充值余额、购买 10 小时/30 小时/月卡，消费时优先扣除时长包余额，不足时扣余额。
-3. **机位预约与续费**：会员预约指定机位与时段，到店扫码开机，上机过程可续费延长时长。
+3. **机位预约、改期与续费**：会员预约指定机位与时段；开始前 30 分钟以上且预约处于待确认/已确认状态时可直接改期（换机位、换时段），无需先取消再重新抢；到店扫码开机，上机过程可续费延长时长。
 4. **上机时长排行榜**：按日/周/月统计会员累计上机时长，支持按游戏类型（LOL/CSGO/王者荣耀）筛选。
 5. **赛事报名与战队管理**：门店发布电竞赛事，玩家个人/战队报名，系统自动抽签分组，记录比赛结果与战绩。
 
@@ -153,10 +153,14 @@ docker compose up -d --build
 | 方法 | 路径 | 说明 | 权限 |
 | --- | --- | --- | --- |
 | GET | /reservations | 预约分页列表 | 登录 |
+| GET | /reservations/:id | 预约详情 | 登录 |
 | POST | /reservations | 创建预约 | 登录 |
 | POST | /reservations/:id/confirm | 确认预约 | admin/staff |
 | POST | /reservations/:id/cancel | 取消预约 | 登录 |
+| POST | /reservations/:id/reschedule | 预约改期（换机位/换时段） | 登录（仅本人或 admin/staff） |
 | POST | /reservations/:id/checkin | 到店开机 | admin/staff |
+
+> 改期规则：仅 `pending`（待确认）/`confirmed`（已确认）且距开始时间 30 分钟以上可改期；新时段与目标机位的有效预约（pending/confirmed/checked_in）重叠时返回 409 冲突，**原预约保留不变**；改到其他机位且原机位无其他有效预约时，原机位恢复 `idle`、目标机位置为 `reserved`。
 
 ### 上机记录
 
@@ -213,6 +217,11 @@ curl -sS http://localhost:29506/api/v1/stations?page=1\&page_size=5 -H "Authoriz
 curl -sS -X POST http://localhost:29506/api/v1/reservations \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"station_id":1,"start_time":"2026-08-17T10:00:00+08:00","end_time":"2026-08-17T12:00:00+08:00"}'
+
+# 4b. 预约改期：换到 2 号机位、新时段（开始前 30 分钟以上；冲突时原预约保留）
+curl -sS -X POST http://localhost:29506/api/v1/reservations/1/reschedule \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"station_id":2,"start_time":"2026-08-18T14:00:00+08:00","end_time":"2026-08-18T16:00:00+08:00"}'
 
 # 5. 购买时长包
 curl -sS -X POST http://localhost:29506/api/v1/recharges/packages \
@@ -280,7 +289,7 @@ npm run build
 
 | 端 | 文件 |
 | --- | --- |
-| 后端 | `backend/internal/constants/enums.go`（定义）、`backend/internal/model/reservation.go`、`backend/internal/dto/reservation_dto.go`（oneof 校验）、`backend/internal/service/reservation_service.go`（状态机 Confirm/Cancel/CheckIn）、`backend/internal/util/formatters.go`（StatusText）、`backend/internal/constants/error_codes.go`（CodeReservation）、`backend/internal/constants/log_templates.go`（reservation_* 模板）、`backend/internal/repository/reservation_repository.go`（CountConflict 状态集合） |
+| 后端 | `backend/internal/constants/enums.go`（定义）、`backend/internal/model/reservation.go`、`backend/internal/dto/reservation_dto.go`（oneof 校验）、`backend/internal/service/reservation_service.go`（状态机 Confirm/Cancel/CheckIn/Reschedule，改期要求 pending/confirmed 且开始前 30 分钟以上）、`backend/internal/util/formatters.go`（StatusText）、`backend/internal/constants/error_codes.go`（CodeReservation）、`backend/internal/constants/log_templates.go`（reservation_* 模板）、`backend/internal/repository/reservation_repository.go`（CountConflict 状态集合） |
 | 前端 | `frontend/src/constants/index.ts`（RESERVATION_STATUS/TEXT/TYPE）、`frontend/src/components/StatusBadge.vue`、`frontend/src/pages/Reservations.vue`（筛选与操作按钮显隐） |
 
 ### 赛事状态（draft / open / ready / finished）

@@ -14,8 +14,16 @@ export function listReservations(params: { page: number; page_size: number; stat
   return get<{ list: Reservation[]; total: number }>('/reservations', params)
 }
 
+export function getReservation(id: number) {
+  return get<Reservation>(`/reservations/${id}`)
+}
+
 export function createReservation(data: { station_id: number; start_time: string; end_time: string; remark?: string }) {
   return post<Reservation>('/reservations', data)
+}
+
+export function rescheduleReservation(id: number, data: { station_id: number; start_time: string; end_time: string }) {
+  return post<Reservation>(`/reservations/${id}/reschedule`, data)
 }
 
 export function confirmReservation(id: number) {
